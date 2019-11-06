@@ -1,0 +1,175 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:validation="http://www.mulesoft.org/schema/mule/validation" xmlns:http="http://www.mulesoft.org/schema/mule/http"
+	 xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core" xmlns:java="http://www.mulesoft.org/schema/mule/java" xmlns:amqp="http://www.mulesoft.org/schema/mule/amqp" xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/amqp http://www.mulesoft.org/schema/mule/amqp/current/mule-amqp.xsd
+http://www.mulesoft.org/schema/mule/java http://www.mulesoft.org/schema/mule/java/current/mule-java.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+http://www.mulesoft.org/schema/mule/validation http://www.mulesoft.org/schema/mule/validation/current/mule-validation.xsd">
+	<flow name="sap-contact-role-implFlow" doc:id="dc9f698b-ecd6-417e-90a2-831b440349c2" >
+		<amqp:listener doc:name="Listener" doc:id="abfd27c5-1626-42df-990e-15dde07014f2" config-ref="AMQP_Inbound_Config" queueName="${mule.sap.event.contactrole.queue}" ackMode="MANUAL" numberOfConsumers="1" createFallbackQueue="true" outputMimeType="application/json">
+			<amqp:fallback-queue-definition exchangeToBind="${mule.sfdc.event.topic}" />
+			<amqp:listener-quality-of-service-config prefetchCount="1" />
+		</amqp:listener>
+		<ee:transform doc:name="saveAckId" doc:id="5fb5ded8-aa7e-446c-87bb-67ddfd7c6281" >
+			<ee:message >
+			</ee:message>
+			<ee:variables >
+				<ee:set-variable variableName="acknowledge" ><![CDATA[%dw 2.0
+output application/java
+---
+attributes.ackId
+]]></ee:set-variable>
+			</ee:variables>
+		</ee:transform>
+		<java:invoke method="acquire(int)" doc:name="Throttle AMQP messages" doc:id="3eda3786-3de8-49f6-ad6a-df9662b19418" instance="#[app.registry.rateLimiter]" class="org.iata.throttling.AmqpRateLimiter" target="rateResult" >
+			<java:args ><![CDATA[#[{arg0: 1}]]]></java:args>
+		</java:invoke>
+		<flow-ref doc:name="Get_Correlation_ID" doc:id="eeee3cdd-8274-40d6-abe8-a75b648e21d1" name="Get_Correlation_ID"/>
+		<logger level="INFO" doc:name="Logger" doc:id="08d04f1f-1f58-4fb4-9ae6-1fe287aa182d" message='#[vars.MULE_CORRELATION_ID]: INT_306 request from SFDC Platform Event: #[payload]'/>
+		<ee:transform doc:name="Save payload" doc:id="ac3af43c-3f04-4574-ad19-804a3d18e2c4" >
+			<ee:message />
+			<ee:variables >
+				<ee:set-variable variableName="originMessage" ><![CDATA[%dw 2.0
+output application/json
+---
+payload]]></ee:set-variable>
+			</ee:variables>
+		</ee:transform>
+		<ee:transform doc:name="Set variables" doc:id="92cf4055-5163-4e3d-84df-3e1d669bbf1e">
+			<ee:message>
+				<ee:set-payload><![CDATA[%dw 2.0
+output application/java
+---
+{
+	"Id":vars.originMessage.data.payload.RecordId__c as String,
+	"Type":vars.originMessage.data.payload.EventType__c as String,
+	"Request":"SELECT_Account_Contact_Role_V2",
+	"Interface": "SAP",
+	"replayId": vars.originMessage.data.event.replayId as Number
+}]]></ee:set-payload>
+			</ee:message>
+			<ee:variables>
+			</ee:variables>
+		</ee:transform>
+		<validation:is-not-blank-string doc:name="ID missing" doc:id="5306402c-9f2e-477a-92b2-4d58e778c1a5" value="#[payload.Id]" message="Missing ID : AddressRoleBusinessContextId__c" />
+		<flow-ref doc:name="INT_306-Salesforce-Query : CallAccountContactRole" doc:id="289f2a46-67c2-4dcf-bf9a-6aac37a94762" name="INT_306-Salesforce-Query"/>		
+		<validation:is-not-blank-string doc:name="ID Missing" doc:id="0ee71cc3-e2e0-410c-a45d-1d39253b90ed" value='#[vars.sfdcResponse.result[0].Contact__c as String default ""]' message="Contact missing in Account_Contact_Role__c object"/>		
+		<choice doc:name="Choice" doc:id="5692274b-16fd-4016-a43f-3519053380ed">
+			<when expression="#[lower(vars.sfdcResponse.result[0].Functional_Role__c as String default &quot;&quot;)=='e&amp;f' or lower(vars.sfdcResponse.result[0].Functional_Role__c as String default &quot;&quot;)=='eaf']">
+				<flow-ref doc:name="sap-contact-impl-efcrm2" doc:id="784504b7-65ae-47d2-ad88-19c6135911fe" name="sap-contact-impl-efcrm2" />
+			</when>
+			<otherwise>
+				<logger level="DEBUG" doc:name="Nothing to do" doc:id="b8146fa4-b4cd-485d-9070-9a41914448af" message="#[vars.MULE_CORRELATION_ID]: Event ignored, not a E&amp;F account: payload: #[vars.sfdcResponse.result[0]]" />
+			</otherwise>
+		</choice>
+		<amqp:ack doc:name="Ack" doc:id="0ad354f3-2564-4018-a1ea-ee31695ede1d" ackId="#[vars.acknowledge]" />
+		<error-handler >
+			<on-error-propagate enableNotifications="true" logException="false" doc:name="On Error propagate" doc:id="87579f74-d771-4220-b14b-b95e164e96a8" doc:description="This exception handler will publish a message that was rejected by SAP to the ‘poison’ message queue. This is typically because there is bad data in the message.
+Posin messages can be corrected and manually fed back into the processing via the original queue." type="HTTP:BAD_REQUEST, HTTP:NOT_ACCEPTABLE, HTTP:NOT_FOUND, EXPRESSION,  HTTP:INTERNAL_SERVER_ERROR,VALIDATION:INVALID_BOOLEAN, VALIDATION:NULL, VALIDATION:BLANK_STRING" >
+				<flow-ref doc:name="logMessageContact" doc:id="16a432a2-6c7a-4069-94e5-1e7b739b01a6" name="logMessageContact" />
+				<flow-ref doc:name="SNOW Ticket" doc:id="70c7b96b-b037-421f-ab78-5b90d2611c0a" name="Create-ServiceNow-Incident" />
+				<amqp:reject doc:name="Reject" doc:id="a64d1c1f-5794-42d7-8109-aadcbad7fdaa" ackId="#[vars.acknowledge]" />
+			</on-error-propagate>
+			<on-error-propagate enableNotifications="true" logException="false" doc:name="On Error propagate" doc:id="5047965d-19a9-424d-87b6-ca857a95c41a" doc:description="This exception handler flow will publish the original message to a ‘dead’ message queue. This is most likely due to an interruption in network services or other security issue that cannot be closed at this time. Dead messdages can be reprocessed manually by shoveling them into the input queue. All messages have a time stamp and so no late over-riding messages will be accepted by SAP logic." type="HTTP:CLIENT_SECURITY, HTTP:CONNECTIVITY, HTTP:FORBIDDEN, HTTP:SERVICE_UNAVAILABLE, HTTP:TIMEOUT, HTTP:UNAUTHORIZED" >
+				<flow-ref doc:name="logMessageContact" doc:id="6703a3d5-1cbd-46a9-a20b-0666cc3e2424" name="logMessageContact" />
+				<flow-ref doc:name="SNOW Ticket" doc:id="4d6455d8-cd0d-466f-a8fa-3d4213476c3e" name="Create-ServiceNow-Incident" />
+				<amqp:reject doc:name="Reject_and_Requeue" doc:id="d12f3aa0-2a85-45c7-99af-33b7ea2c7cac" ackId="#[vars.acknowledge]" requeue="true" />
+			</on-error-propagate>
+		</error-handler>
+	</flow>
+	<sub-flow name="sap-contact-impl-efcrm2" doc:id="f14cbbfb-a49d-4ea0-833a-b91e3814759c" >
+		<ee:transform doc:name="GET AccountContactRole" doc:id="368db40b-8d21-463d-b52c-450c93bb6f72" >
+			<ee:message >
+				<ee:set-payload ><![CDATA[%dw 2.0
+output application/json
+---
+{
+	"Id": vars.sfdcResponse.result[0].Contact__c as String,
+	"Request": "SELECT_Contact_V1",
+	"Interface": "SAP"
+}]]></ee:set-payload>
+			</ee:message>
+			<ee:variables >
+				<ee:set-variable variableName="AccountContactRole" ><![CDATA[%dw 2.0
+output application/java
+---
+{
+	"globalId" : vars.sfdcResponse.result[0].Account_Role__r.Account__r.Global_ID__c as String default ""
+}]]></ee:set-variable>
+			</ee:variables>
+		</ee:transform>
+		<flow-ref doc:name="INT_306-Salesforce-Query : CallContact" doc:id="ebbfe1a9-f48c-40a9-a18e-5fd0158df597" name="INT_306-Salesforce-Query" />
+		<ee:transform doc:name="payload for SAP" doc:id="c89f8d35-f17e-455b-8819-7217df0f6a71" >
+			<ee:message >
+				<ee:set-payload ><![CDATA[%dw 2.0
+output application/json
+fun substr(word:String, len_min:Number, len_max:Number) = 
+	if ((sizeOf(word)-1) > len_max)
+		word[len_min to len_max]
+	else
+		word[len_min to (sizeOf(word)-1) ]
+---
+{
+	RequestType : upper(vars.originMessage.data.payload.EventType__c[0] default "") ++ "CN",
+	SFAccountGlobalID: vars.AccountContactRole.globalId as String,
+	SFContactGlobalID: vars.sfdcResponse.result[0].Global_ID__c default "",
+	FirstName: substr(vars.sfdcResponse.result[0].FirstName default "",0,39),
+	LastName: substr(vars.sfdcResponse.result[0].LastName default "",0,39),
+	Telephone: substr(vars.sfdcResponse.result[0].Phone default "",0,29),
+	Department: "",
+	Function: "",
+	Email: vars.sfdcResponse.result[0].Email__c default ""
+}]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+		<logger level="INFO" doc:name="Logger" doc:id="1cf58c76-9b76-4d26-87de-a3696b57f615" message="#[vars.MULE_CORRELATION_ID]: payload to SAP from SFDC System API: #[payload]"/>
+		<set-variable value="#[payload]" doc:name="sapPayload" doc:id="7741443f-6b18-48ba-a7d3-17e79f543da4" variableName="sapPayload" />
+		<logger level="INFO" doc:name="Payload to SAP" doc:id="b109fd76-a118-4a6c-8585-20ab6fd5e0f4" message="#[vars.MULE_CORRELATION_ID]: payload to SAP from SFDC System API: #[vars.sapPayload] and token :#[vars.XcsrfToken] and url : HTTPS:\/\/${secure::sap.gw.host}:${secure::sap.gw.https.port}${secure::sap.gw.basePath}\/sap\/opu\/odata\/sap\/ZOTC_CUSTOMER_MAINTAIN_SRV\/ZOTC_INBOUND_CUSTOMERSET]" />
+		<flow-ref doc:name="refreshToken" doc:id="42070cc6-2d26-4079-af7b-9e82259596aa" doc:description="Call to the cache/flow to get a new security token for the SAP connection." name="refreshToken" target="XcsrfToken" targetValue="#[payload]" />
+		<http:request method="POST" doc:name="Call_SAP" doc:id="87f17856-379d-476e-82e2-c4040683cf9b" doc:description="Call the HTTP Odata service on the SAP Gateway" config-ref="SAP_HTTPS_Request_configuration" path="/ZOTC_CUSTOMER_MAINTAIN_SRV/ZOTC_INBOUND_CONTACTSET" outputMimeType="application/json" target="sapResponse">
+			<http:body><![CDATA[#[vars.sapPayload]]]></http:body>
+			<http:headers><![CDATA[#[output application/java
+---
+{
+	"X-CSRF-Token" : vars.XcsrfToken,
+	"Accept" : "application/json",
+	"content-type" : "application/json"
+}]]]></http:headers>
+		</http:request>
+		<set-variable value="#[attributes.statusCode]" doc:name="Set Status SAP" doc:id="90215125-0227-4035-aecb-2fee42ee4a4c" variableName="statusCodeSAP" />
+		<set-variable value='#[attributes.reasonPhrase default ""]' doc:name="Set Error SAP" doc:id="f5f87aa3-fd91-44e6-a4ed-32313f839f64" variableName="ErrorSAP" />
+		<choice doc:name="Choice" doc:id="38a6d2cd-47b0-4275-8a69-17952192e427">
+					<when expression='#[["CSP","CBP","UBP","DBP"] contains (vars.AddresRoleData.RequestType)]'>
+						<flow-ref doc:name="Call Back SAP" doc:id="8622f1f5-ba2f-4b43-9a21-e52bae04f542" name="INT_306-Salesforce-Request" />
+					</when>
+					<otherwise>
+						<logger level="INFO" doc:name="no call back sap" doc:id="5daca4cc-9254-49a2-9e9c-a7e1333aff7c" message="#[vars.MULE_CORRELATION_ID]: no callback SAP]" />
+					</otherwise>
+				</choice>
+				<validation:is-true doc:name="Check satstus error sap" doc:id="1b94499b-f513-40d6-b05f-dafe664609b2" expression="#[vars.statusCodeSAP &lt;= 400]" message='#["Status SAP error : " ++ vars.statusCodeSAP  as String default "" ++ " error : "  ++ vars.ErrorSap as String default ""]'/>
+	</sub-flow>
+	<sub-flow name="logMessageContact" doc:id="91bd3f3a-f02a-4667-94e1-85795332c50d" doc:description="Error logging:
+Build a document (JSON) that includes:
+o SAP Customer Number
+o SF Account ID
+o Error condition
+o Original payload
+o Payload that was sent to SAP" >
+		<ee:transform doc:name="logMessage" doc:id="1bd92564-9f37-491b-8572-208d559a3f24" >
+			<ee:message />
+			<ee:variables >
+				<ee:set-variable variableName="logMessage" ><![CDATA[%dw 2.0
+output application/json
+---
+{
+	"transactionId": vars.MULE_CORRELATION_ID,
+	"error": error.description,
+	"inputPayload": vars.originMessage
+}]]></ee:set-variable>
+			</ee:variables>
+		</ee:transform>
+		<logger level="INFO" doc:name="Logger" doc:id="77d695d7-8c26-474f-91b4-fabb2cb1cee5" message="#[vars.logMessage]" />
+	</sub-flow>
+</mule>
